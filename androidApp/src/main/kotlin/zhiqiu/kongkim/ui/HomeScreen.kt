@@ -3,6 +3,7 @@
 package zhiqiu.kongkim.ui
 
 import android.Manifest
+import android.content.Context
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,6 +35,8 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.SelfImprovement
@@ -48,6 +51,7 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -64,6 +68,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,6 +77,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.NotificationManagerCompat
@@ -95,6 +101,7 @@ fun HomeScreen() {
 
     val lifecycleOwner = LocalLifecycleOwner.current
     var showTimePicker by remember { mutableStateOf(false) }
+    var fullscreen by rememberSaveable { mutableStateOf(false) }
     var notificationsEnabled by remember { mutableStateOf(true) }
     var exactAlarmsAllowed by remember { mutableStateOf(viewModel.canScheduleExactAlarms()) }
 
@@ -127,18 +134,149 @@ fun HomeScreen() {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    Scaffold(containerColor = MaterialTheme.colorScheme.background) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)
-        ) {
-            AppHeader(isPlaying = player.isPlaying)
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(containerColor = MaterialTheme.colorScheme.background) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp)
+            ) {
+                AppHeader(isPlaying = player.isPlaying)
 
-            NowPlayingCard(
+                NowPlayingCard(
+                    state = player,
+                    position = viewModel.position,
+                    sessionPlayer = viewModel.sessionPlayer,
+                    surfaceAttached = !fullscreen,
+                    onTogglePlay = viewModel::togglePlay,
+                    onSkipBackward = viewModel::skipBackward,
+                    onSkipForward = viewModel::skipForward,
+                    onSeek = viewModel::seekTo,
+                    onRestart = viewModel::restart,
+                    onSpeedChange = viewModel::setSpeed,
+                    onRetry = viewModel::retry,
+                    onEnterFullscreen = { fullscreen = true },
+                )
+
+                SectionHeader("练习设置")
+                SectionCard {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            MediaTrack.entries.forEach { option ->
+                                VersionTile(
+                                    track = option,
+                                    selected = option == player.track,
+                                    onClick = { viewModel.setTrack(option) }
+                                )
+                            }
+                        }
+                        SwitchRow(
+                            icon = if (player.audioOnly) {
+                                Icons.Filled.VideocamOff
+                            } else {
+                                Icons.Filled.Videocam
+                            },
+                            title = "仅音频播放",
+                            subtitle = "关闭画面更省电，息屏也能继续跟练",
+                            checked = player.audioOnly,
+                            onCheckedChange = viewModel::setAudioOnly
+                        )
+                    }
+                }
+
+                SectionHeader("每日提醒")
+                SectionCard {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        SwitchRow(
+                            icon = Icons.Outlined.Alarm,
+                            title = "每日提醒",
+                            subtitle = if (alarm.enabled) {
+                                "已开启 · ${alarm.track.label}"
+                            } else {
+                                "关闭"
+                            },
+                            checked = alarm.enabled,
+                            onCheckedChange = { enabled ->
+                                if (enabled && !viewModel.canScheduleExactAlarms()) {
+                                    viewModel.openExactAlarmSettings()
+                                }
+                                exactAlarmsAllowed = viewModel.canScheduleExactAlarms()
+                                viewModel.setAlarmEnabled(enabled)
+                            }
+                        )
+
+                        TimeRow(
+                            hour = alarm.hour,
+                            minute = alarm.minute,
+                            onClick = { showTimePicker = true }
+                        )
+
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "提醒版本",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                MediaTrack.entries.forEach { option ->
+                                    FilterChip(
+                                        selected = option == alarm.track,
+                                        onClick = { viewModel.setAlarmTrack(option) },
+                                        label = { Text(option.label) }
+                                    )
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = "到点由本应用直接播放，不依赖系统铃声",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                if (alarm.enabled && !exactAlarmsAllowed) {
+                    HintCard(
+                        icon = Icons.Outlined.Warning,
+                        text = "系统还未允许精确闹钟，提醒可能延迟",
+                        actionLabel = "去设置",
+                        onAction = viewModel::openExactAlarmSettings,
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+
+                if (!notificationsEnabled) {
+                    HintCard(
+                        icon = Icons.Outlined.Notifications,
+                        text = "通知权限关闭时，锁屏与通知栏的播放控制可能不可用",
+                        actionLabel = null,
+                        onAction = null,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(Modifier.height(24.dp))
+            }
+        }
+
+        if (fullscreen) {
+            FullscreenPlayer(
                 state = player,
                 position = viewModel.position,
                 sessionPlayer = viewModel.sessionPlayer,
@@ -147,121 +285,10 @@ fun HomeScreen() {
                 onSkipForward = viewModel::skipForward,
                 onSeek = viewModel::seekTo,
                 onRestart = viewModel::restart,
-                onSpeedChange = viewModel::setSpeed,
                 onRetry = viewModel::retry,
+                onSpeedChange = viewModel::setSpeed,
+                onExit = { fullscreen = false }
             )
-
-            SectionHeader("练习设置")
-            SectionCard {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        MediaTrack.entries.forEach { option ->
-                            VersionTile(
-                                track = option,
-                                selected = option == player.track,
-                                onClick = { viewModel.setTrack(option) }
-                            )
-                        }
-                    }
-                    SwitchRow(
-                        icon = if (player.audioOnly) {
-                            Icons.Filled.VideocamOff
-                        } else {
-                            Icons.Filled.Videocam
-                        },
-                        title = "仅音频播放",
-                        subtitle = "关闭画面更省电，息屏也能继续跟练",
-                        checked = player.audioOnly,
-                        onCheckedChange = viewModel::setAudioOnly
-                    )
-                }
-            }
-
-            SectionHeader("每日提醒")
-            SectionCard {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    SwitchRow(
-                        icon = Icons.Outlined.Alarm,
-                        title = "每日提醒",
-                        subtitle = if (alarm.enabled) {
-                            "已开启 · ${alarm.track.label}"
-                        } else {
-                            "关闭"
-                        },
-                        checked = alarm.enabled,
-                        onCheckedChange = { enabled ->
-                            if (enabled && !viewModel.canScheduleExactAlarms()) {
-                                viewModel.openExactAlarmSettings()
-                            }
-                            exactAlarmsAllowed = viewModel.canScheduleExactAlarms()
-                            viewModel.setAlarmEnabled(enabled)
-                        }
-                    )
-
-                    TimeRow(
-                        hour = alarm.hour,
-                        minute = alarm.minute,
-                        onClick = { showTimePicker = true }
-                    )
-
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            text = "提醒版本",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            MediaTrack.entries.forEach { option ->
-                                FilterChip(
-                                    selected = option == alarm.track,
-                                    onClick = { viewModel.setAlarmTrack(option) },
-                                    label = { Text(option.label) }
-                                )
-                            }
-                        }
-                    }
-
-                    Text(
-                        text = "到点由本应用直接播放，不依赖系统铃声",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            if (alarm.enabled && !exactAlarmsAllowed) {
-                HintCard(
-                    icon = Icons.Outlined.Warning,
-                    text = "系统还未允许精确闹钟，提醒可能延迟",
-                    actionLabel = "去设置",
-                    onAction = viewModel::openExactAlarmSettings,
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer
-                )
-            }
-
-            if (!notificationsEnabled) {
-                HintCard(
-                    icon = Icons.Outlined.Notifications,
-                    text = "通知权限关闭时，锁屏与通知栏的播放控制可能不可用",
-                    actionLabel = null,
-                    onAction = null,
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            Spacer(Modifier.height(24.dp))
         }
     }
 
@@ -376,6 +403,7 @@ private fun NowPlayingCard(
     state: PlayerUiState,
     position: StateFlow<Long>,
     sessionPlayer: Player?,
+    surfaceAttached: Boolean,
     onTogglePlay: () -> Unit,
     onSkipBackward: () -> Unit,
     onSkipForward: () -> Unit,
@@ -383,6 +411,7 @@ private fun NowPlayingCard(
     onRestart: () -> Unit,
     onSpeedChange: (Float) -> Unit,
     onRetry: () -> Unit,
+    onEnterFullscreen: () -> Unit,
 ) {
     Surface(
         shape = RoundedCornerShape(28.dp),
@@ -394,7 +423,9 @@ private fun NowPlayingCard(
             MediaStage(
                 state = state,
                 sessionPlayer = sessionPlayer,
-                onTogglePlay = onTogglePlay
+                surfaceAttached = surfaceAttached,
+                onTogglePlay = onTogglePlay,
+                onEnterFullscreen = onEnterFullscreen
             )
             Column(
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
@@ -513,7 +544,9 @@ private fun NowPlayingCard(
 private fun MediaStage(
     state: PlayerUiState,
     sessionPlayer: Player?,
+    surfaceAttached: Boolean,
     onTogglePlay: () -> Unit,
+    onEnterFullscreen: () -> Unit,
 ) {
     Box(
         modifier = Modifier
@@ -529,70 +562,129 @@ private fun MediaStage(
             ),
         contentAlignment = Alignment.Center
     ) {
+        // 同一时刻只能有一个 PlayerView 占着这条视频输出，全屏时卡片这边先让位
+        if (surfaceAttached) {
+            StageSurface(sessionPlayer = sessionPlayer, onTogglePlay = onTogglePlay)
+        }
+        if (sessionPlayer == null) {
+            Text(
+                text = "正在连接播放服务…",
+                style = MaterialTheme.typography.labelLarge,
+                color = Color.White
+            )
+        }
         if (state.audioOnly) {
+            AudioModeOverlay()
+        } else if (surfaceAttached) {
+            StageControls(
+                fullscreen = false,
+                onToggleFullscreen = onEnterFullscreen,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(12.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun StageSurface(
+    sessionPlayer: Player?,
+    onTogglePlay: () -> Unit,
+) {
+    AndroidView(
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                useController = false
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                // 换曲、播完后重新 prepare 都会 reset，默认亮出黑色快门，保留上一帧就不闪
+                setKeepContentOnPlayerReset(true)
+            }
+        },
+        update = { view ->
+            // setPlayer 会先解绑再重绑 Surface，重组一次就闪一下，只在实例真变了时才设
+            if (view.player !== sessionPlayer) {
+                view.player = sessionPlayer
+            }
+            view.setOnClickListener { onTogglePlay() }
+        },
+        onRelease = { view ->
+            // 离开这个界面时解绑 Surface，别把解码输出留在内存里
+            view.player = null
+        },
+        modifier = Modifier.fillMaxSize()
+    )
+}
+
+@Composable
+private fun StageControls(
+    fullscreen: Boolean,
+    onToggleFullscreen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(42.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.45f)),
+        contentAlignment = Alignment.Center
+    ) {
+        IconButton(
+            onClick = onToggleFullscreen,
+            modifier = Modifier.size(42.dp)
+        ) {
+            Icon(
+                imageVector = if (fullscreen) {
+                    Icons.Filled.FullscreenExit
+                } else {
+                    Icons.Filled.Fullscreen
+                },
+                contentDescription = if (fullscreen) "退出全屏" else "全屏播放",
+                tint = Color.White,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun AudioModeOverlay() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.linearGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f),
+                        MaterialTheme.colorScheme.surfaceContainerHighest
+                    )
+                )
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.linearGradient(
-                            listOf(
-                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f),
-                                MaterialTheme.colorScheme.surfaceContainerHighest
-                            )
-                        )
-                    ),
+                    .size(92.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerLowest),
                 contentAlignment = Alignment.Center
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(92.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surfaceContainerLowest),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Headphones,
-                            contentDescription = null,
-                            modifier = Modifier.size(40.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Text(
-                        text = "音频模式",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        } else {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        useController = false
-                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    }
-                },
-                update = { view ->
-                    view.player = sessionPlayer
-                    view.setOnClickListener { onTogglePlay() }
-                },
-                onRelease = { view ->
-                    // 切到音频模式时解绑 Surface，别把解码输出留在内存里
-                    view.player = null
-                },
-                modifier = Modifier.fillMaxSize()
-            )
-            if (sessionPlayer == null) {
-                Text(
-                    text = "正在连接播放服务…",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = Color.White
+                Icon(
+                    imageVector = Icons.Filled.Headphones,
+                    contentDescription = null,
+                    modifier = Modifier.size(40.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            Text(
+                text = "音频模式",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -631,11 +723,12 @@ private fun PositionScrubber(
     position: StateFlow<Long>,
     durationMs: Long,
     onSeek: (Long) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     if (durationMs <= 0L) {
         LinearProgressIndicator(
             progress = { 0f },
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxWidth()
                 .height(4.dp)
         )
@@ -645,30 +738,32 @@ private fun PositionScrubber(
     val positionMs by position.collectAsStateWithLifecycle()
     var dragPosition by remember { mutableStateOf<Float?>(null) }
     val shown = (dragPosition ?: positionMs.toFloat()).coerceIn(0f, durationMs.toFloat())
-    Slider(
-        value = shown,
-        onValueChange = { dragPosition = it },
-        onValueChangeFinished = {
-            dragPosition?.let { onSeek(it.toLong()) }
-            dragPosition = null
-        },
-        valueRange = 0f..durationMs.toFloat(),
-        modifier = Modifier.fillMaxWidth()
-    )
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(
-            text = PlayerViewModel.formatTime(positionMs, durationMs),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(modifier = modifier) {
+        Slider(
+            value = shown,
+            onValueChange = { dragPosition = it },
+            onValueChangeFinished = {
+                dragPosition?.let { onSeek(it.toLong()) }
+                dragPosition = null
+            },
+            valueRange = 0f..durationMs.toFloat(),
+            modifier = Modifier.fillMaxWidth()
         )
-        Text(
-            text = "-" + PlayerViewModel.formatTime(durationMs - positionMs, durationMs),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = PlayerViewModel.formatTime(positionMs, durationMs),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "-" + PlayerViewModel.formatTime(durationMs - positionMs, durationMs),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 

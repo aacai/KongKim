@@ -248,7 +248,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun setTrack(track: MediaTrack) {
         if (track == _player.value.track) return
         _position.value = 0L
-        _player.update { it.copy(track = track, durationMs = 0L) }
+        // duration 留着上一次的：清零会让进度条换成占位条，卡片高度跟着抖一下
+        _player.update { it.copy(track = track) }
         pushConfig(play = _player.value.isPlaying)
     }
 

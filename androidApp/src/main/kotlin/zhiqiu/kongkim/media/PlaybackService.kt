@@ -26,11 +26,15 @@ class PlaybackService : MediaSessionService() {
     private lateinit var prefs: AppPreferences
     private var audioOnly = false
     private var screenOn = true
+    private var videoTrackDisabled = false
+    /** 播完后 stop() 会保留结尾位置，重新点播时必须先重建 media item 才能回到开头 */
+    private var stoppedAtEnd = false
 
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             // 练完整套就交还解码器和缓冲队列，别让几十 MB 挂在后台
             if (playbackState == Player.STATE_ENDED) {
+                stoppedAtEnd = true
                 player.stop()
             }
         }
@@ -118,8 +122,16 @@ class PlaybackService : MediaSessionService() {
         val uri = "asset:///$asset"
         val current = player.currentMediaItem
         if (current?.localConfiguration?.uri?.toString() != uri) {
-            // 同一版本在画面/音频之间切换时保留进度，换版本才回到开头
-            val resumeAt = if (current?.mediaId == track.id) player.currentPosition else C.TIME_UNSET
+            // 同一版本在画面/音频之间切换时保留进度，换版本才回到开头；
+            // 停在结尾时不要续播，否则一点重播就会原地结束
+            val resumeAt = if (stoppedAtEnd) {
+                C.TIME_UNSET
+            } else if (current?.mediaId == track.id) {
+                player.currentPosition
+            } else {
+                C.TIME_UNSET
+            }
+            stoppedAtEnd = false
             player.setMediaItem(
                 MediaItem.fromUri(uri).buildUpon().setMediaId(track.id).build()
             )
@@ -128,7 +140,14 @@ class PlaybackService : MediaSessionService() {
                 player.seekTo(resumeAt)
             }
         } else if (player.playbackState == Player.STATE_IDLE) {
-            // 播完后 stop() 释放了解码器，重新点播要先 prepare
+            // 播完后 stop() 释放了解码器，重新点播要先 prepare；
+            // 停在结尾时重建 media item，从头开始而不是原地重播
+            if (stoppedAtEnd) {
+                stoppedAtEnd = false
+                player.setMediaItem(
+                    MediaItem.fromUri(uri).buildUpon().setMediaId(track.id).build()
+                )
+            }
             player.prepare()
         }
         applyVideoTrack()
@@ -142,10 +161,14 @@ class PlaybackService : MediaSessionService() {
     /**
      * 只听声音、或者界面已经不可见（息屏/切后台，Surface 被系统销毁）时撤掉视频轨道：
      * 解码器继续往没了的 Surface 上吐帧会把输出队列堵死，声音也就跟着停了。
+     * 只在开关真的变了时才改参数，重写一次就会让解码器重启、画面闪一下。
      */
     private fun applyVideoTrack() {
+        val disabled = audioOnly || !screenOn
+        if (videoTrackDisabled == disabled) return
+        videoTrackDisabled = disabled
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly || !screenOn)
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, disabled)
             .build()
     }
 
