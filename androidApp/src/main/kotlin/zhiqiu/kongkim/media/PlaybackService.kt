@@ -24,6 +24,8 @@ class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private lateinit var player: ExoPlayer
     private lateinit var prefs: AppPreferences
+    private var audioOnly = false
+    private var screenOn = true
 
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -91,6 +93,9 @@ class PlaybackService : MediaSessionService() {
                 )
                 val speed = intent.getFloatExtra(EXTRA_SPEED, prefs.speed)
                 val play = intent.getBooleanExtra(EXTRA_PLAY, true)
+                if (intent.hasExtra(EXTRA_SCREEN_ON)) {
+                    screenOn = intent.getBooleanExtra(EXTRA_SCREEN_ON, true)
+                }
                 applyConfig(track, audioOnly, speed, play)
                 if (intent.action != ACTION_ALARM) {
                     prefs.track = track
@@ -108,6 +113,7 @@ class PlaybackService : MediaSessionService() {
         speed: Float,
         play: Boolean
     ) {
+        this.audioOnly = audioOnly
         val asset = track.assetFile(audioOnly)
         val uri = "asset:///$asset"
         val current = player.currentMediaItem
@@ -125,15 +131,22 @@ class PlaybackService : MediaSessionService() {
             // 播完后 stop() 释放了解码器，重新点播要先 prepare
             player.prepare()
         }
-        // 只听声音时不必挂视频轨道，省下一个硬解码器的内存
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly)
-            .build()
+        applyVideoTrack()
         player.setPlaybackSpeed(speed)
         if (play) {
             player.playWhenReady = true
             player.play()
         }
+    }
+
+    /**
+     * 只听声音、或者界面已经不可见（息屏/切后台，Surface 被系统销毁）时撤掉视频轨道：
+     * 解码器继续往没了的 Surface 上吐帧会把输出队列堵死，声音也就跟着停了。
+     */
+    private fun applyVideoTrack() {
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly || !screenOn)
+            .build()
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
@@ -173,6 +186,7 @@ class PlaybackService : MediaSessionService() {
                 val audioOnly = args.getBoolean(EXTRA_AUDIO_ONLY, prefs.audioOnly)
                 val speed = args.getFloat(EXTRA_SPEED, prefs.speed)
                 val play = args.getBoolean(EXTRA_PLAY, player.isPlaying)
+                screenOn = args.getBoolean(EXTRA_SCREEN_ON, screenOn)
                 applyConfig(track, audioOnly, speed, play)
                 prefs.track = track
                 prefs.audioOnly = audioOnly
@@ -193,6 +207,7 @@ class PlaybackService : MediaSessionService() {
         const val EXTRA_AUDIO_ONLY = "audio_only"
         const val EXTRA_SPEED = "speed"
         const val EXTRA_PLAY = "play"
+        const val EXTRA_SCREEN_ON = "screen_on"
         const val COMMAND_SET_CONFIG = "set_config"
 
         fun configIntent(
@@ -201,13 +216,15 @@ class PlaybackService : MediaSessionService() {
             audioOnly: Boolean,
             speed: Float,
             play: Boolean = true,
-            alarm: Boolean = false
+            alarm: Boolean = false,
+            screenOn: Boolean = true
         ): Intent = Intent(context, PlaybackService::class.java).apply {
             action = if (alarm) ACTION_ALARM else ACTION_CONFIG
             putExtra(EXTRA_TRACK, track.id)
             putExtra(EXTRA_AUDIO_ONLY, audioOnly)
             putExtra(EXTRA_SPEED, speed)
             putExtra(EXTRA_PLAY, play)
+            putExtra(EXTRA_SCREEN_ON, screenOn)
         }
     }
 }

@@ -113,9 +113,14 @@ fun HomeScreen() {
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                exactAlarmsAllowed = viewModel.canScheduleExactAlarms()
-                notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    viewModel.setScreenOn(true)
+                    exactAlarmsAllowed = viewModel.canScheduleExactAlarms()
+                    notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+                }
+                Lifecycle.Event.ON_PAUSE -> viewModel.setScreenOn(false)
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)

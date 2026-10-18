@@ -75,6 +75,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     )
     val alarm: StateFlow<AlarmUiState> = _alarm.asStateFlow()
 
+    /** 界面不可见时由服务撤掉视频轨道，息屏也能把整趟口令放完 */
+    private var screenOn = true
+
     /** 供视频画面绑定；连接完成后 [PlayerUiState.isReady] 会变为 true */
     val sessionPlayer: Player? get() = controller
 
@@ -255,6 +258,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         pushConfig(play = _player.value.isPlaying)
     }
 
+    /** 息屏或切后台时只撤视频轨道，播放本身不停 */
+    fun setScreenOn(screenOn: Boolean) {
+        if (screenOn == this.screenOn) return
+        this.screenOn = screenOn
+        // 没有 controller 就没人在播放，此时去 startService 会撞上后台启动限制
+        if (_player.value.audioOnly || controller == null) return
+        pushConfig(play = _player.value.isPlaying)
+    }
+
     fun setSpeed(speed: Float) {
         val value = nearestSpeed(speed)
         if (value == _player.value.speed) return
@@ -273,6 +285,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             putBoolean(PlaybackService.EXTRA_AUDIO_ONLY, state.audioOnly)
             putFloat(PlaybackService.EXTRA_SPEED, state.speed)
             putBoolean(PlaybackService.EXTRA_PLAY, play)
+            putBoolean(PlaybackService.EXTRA_SCREEN_ON, screenOn)
         }
         val c = controller
         if (c != null) {
@@ -282,7 +295,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             )
         } else {
             app.startService(
-                PlaybackService.configIntent(app, state.track, state.audioOnly, state.speed, play)
+                PlaybackService.configIntent(
+                    context = app,
+                    track = state.track,
+                    audioOnly = state.audioOnly,
+                    speed = state.speed,
+                    play = play,
+                    screenOn = screenOn,
+                )
             )
         }
     }
