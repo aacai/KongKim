@@ -41,7 +41,6 @@ data class PlayerUiState(
     val isPlaying: Boolean = false,
     val isReady: Boolean = false,
     val errorMessage: String? = null,
-    val positionMs: Long = 0L,
     val durationMs: Long = 0L,
 )
 
@@ -66,6 +65,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         )
     )
     val player: StateFlow<PlayerUiState> = _player.asStateFlow()
+
+    /** 播放进度单独一条流：只有进度条订阅它，避免每秒两次重组整屏 */
+    private val _position = MutableStateFlow(0L)
+    val position: StateFlow<Long> = _position.asStateFlow()
 
     private val _alarm = MutableStateFlow(
         AlarmUiState(prefs.alarmEnabled, prefs.alarmHour, prefs.alarmMinute, prefs.alarmTrack)
@@ -99,8 +102,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         connect()
         viewModelScope.launch {
             while (isActive) {
-                syncFromController()
-                delay(500)
+                // 状态变化走 onEvents 回调，这里只在真正播放时补一次进度，暂停就不做跨进程调用
+                if (_player.value.isPlaying) publishPosition()
+                delay(POSITION_POLL_MS)
             }
         }
     }
@@ -151,17 +155,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun syncFromController() {
         val c = controller ?: return
-        val position = c.currentPosition
         val duration = c.duration
         val speed = nearestSpeed(c.playbackParameters.speed)
         if (c.playbackState == Player.STATE_READY) {
             decoderRetries = 0
         }
+        publishPosition()
         _player.update {
             it.copy(
                 isPlaying = c.isPlaying,
-                positionMs = if (position == C.TIME_UNSET || position < 0) 0L else position,
-                durationMs = if (duration == C.TIME_UNSET || duration < 0) 0L else duration,
+                // 播完一套后服务会 stop()，此时 duration 变回 unset，保留上一次的值进度条才不会塌
+                durationMs = if (duration == C.TIME_UNSET || duration < 0) {
+                    it.durationMs
+                } else {
+                    duration
+                },
                 speed = speed,
                 errorMessage = if (c.playbackState == Player.STATE_READY ||
                     c.playbackState == Player.STATE_BUFFERING
@@ -174,6 +182,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (speed != prefs.speed) {
             prefs.speed = speed
+        }
+    }
+
+    private fun publishPosition() {
+        val position = controller?.currentPosition ?: return
+        if (position != C.TIME_UNSET && position >= 0) {
+            _position.value = position
         }
     }
 
@@ -216,20 +231,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun skipBy(seconds: Int) {
         val state = _player.value
         val limit = if (state.durationMs > 0) state.durationMs else Long.MAX_VALUE
-        seekTo((state.positionMs + seconds * 1000L).coerceIn(0L, limit))
+        seekTo((_position.value + seconds * 1000L).coerceIn(0L, limit))
     }
 
     fun seekTo(positionMs: Long) {
         val target = positionMs.coerceAtLeast(0L)
         controller?.seekTo(target)
-        _player.update { it.copy(positionMs = target) }
+        _position.value = target
     }
 
     fun restart() = seekTo(0L)
 
     fun setTrack(track: MediaTrack) {
         if (track == _player.value.track) return
-        _player.update { it.copy(track = track, positionMs = 0L) }
+        _position.value = 0L
+        _player.update { it.copy(track = track, durationMs = 0L) }
         pushConfig(play = _player.value.isPlaying)
     }
 
@@ -316,6 +332,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         val SPEED_OPTIONS = AppPreferences.SPEED_OPTIONS
+
+        /** 进度轮询间隔；暂停时不轮询 */
+        private const val POSITION_POLL_MS = 250L
 
         private const val MAX_DECODER_RETRIES = 2
 

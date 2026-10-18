@@ -83,6 +83,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.Player
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.flow.StateFlow
 import zhiqiu.kongkim.media.MediaTrack
 
 @Composable
@@ -134,6 +135,7 @@ fun HomeScreen() {
 
             NowPlayingCard(
                 state = player,
+                position = viewModel.position,
                 sessionPlayer = viewModel.sessionPlayer,
                 onTogglePlay = viewModel::togglePlay,
                 onSkipBackward = viewModel::skipBackward,
@@ -367,6 +369,7 @@ private fun SectionCard(content: @Composable () -> Unit) {
 @Composable
 private fun NowPlayingCard(
     state: PlayerUiState,
+    position: StateFlow<Long>,
     sessionPlayer: Player?,
     onTogglePlay: () -> Unit,
     onSkipBackward: () -> Unit,
@@ -427,7 +430,7 @@ private fun NowPlayingCard(
                 }
 
                 PositionScrubber(
-                    positionMs = state.positionMs,
+                    position = position,
                     durationMs = state.durationMs,
                     onSeek = onSeek
                 )
@@ -572,6 +575,10 @@ private fun MediaStage(
                     view.player = sessionPlayer
                     view.setOnClickListener { onTogglePlay() }
                 },
+                onRelease = { view ->
+                    // 切到音频模式时解绑 Surface，别把解码输出留在内存里
+                    view.player = null
+                },
                 modifier = Modifier.fillMaxSize()
             )
             if (sessionPlayer == null) {
@@ -616,7 +623,7 @@ private fun SkipButton(
 
 @Composable
 private fun PositionScrubber(
-    positionMs: Long,
+    position: StateFlow<Long>,
     durationMs: Long,
     onSeek: (Long) -> Unit,
 ) {
@@ -629,6 +636,8 @@ private fun PositionScrubber(
         )
         return
     }
+    // 进度单独订阅：每秒四次的跳动只重组这一块，不再牵动整张卡片
+    val positionMs by position.collectAsStateWithLifecycle()
     var dragPosition by remember { mutableStateOf<Float?>(null) }
     val shown = (dragPosition ?: positionMs.toFloat()).coerceIn(0f, durationMs.toFloat())
     Slider(

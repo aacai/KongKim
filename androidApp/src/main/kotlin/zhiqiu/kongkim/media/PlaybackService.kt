@@ -7,7 +7,9 @@ import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -22,6 +24,15 @@ class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private lateinit var player: ExoPlayer
     private lateinit var prefs: AppPreferences
+
+    private val playerListener = object : Player.Listener {
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            // 练完整套就交还解码器和缓冲队列，别让几十 MB 挂在后台
+            if (playbackState == Player.STATE_ENDED) {
+                player.stop()
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -41,7 +52,20 @@ class PlaybackService : MediaSessionService() {
             )
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
+            // 素材是本地 asset，带宽不是瓶颈，缓冲取短：省内存，起播和 seek 也更快
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        /* minBufferMs = */ 8_000,
+                        /* maxBufferMs = */ 20_000,
+                        /* bufferForPlaybackMs = */ 500,
+                        /* bufferForPlaybackAfterSeekMs = */ 1_000
+                    )
+                    .setTargetBufferBytes(TARGET_BUFFER_BYTES)
+                    .build()
+            )
             .build()
+        player.addListener(playerListener)
 
         val sessionActivity = PendingIntent.getActivity(
             this,
@@ -97,7 +121,14 @@ class PlaybackService : MediaSessionService() {
             if (resumeAt != C.TIME_UNSET && resumeAt > 0) {
                 player.seekTo(resumeAt)
             }
+        } else if (player.playbackState == Player.STATE_IDLE) {
+            // 播完后 stop() 释放了解码器，重新点播要先 prepare
+            player.prepare()
         }
+        // 只听声音时不必挂视频轨道，省下一个硬解码器的内存
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly)
+            .build()
         player.setPlaybackSpeed(speed)
         if (play) {
             player.playWhenReady = true
@@ -110,6 +141,7 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         mediaSession?.run {
+            player.removeListener(playerListener)
             player.release()
             release()
             mediaSession = null
@@ -152,6 +184,9 @@ class PlaybackService : MediaSessionService() {
     }
 
     companion object {
+        /** 本地 asset 的读取上限，6MB 足够覆盖 20 秒缓冲 */
+        private const val TARGET_BUFFER_BYTES = 6 * 1024 * 1024
+
         const val ACTION_CONFIG = "zhiqiu.kongkim.action.CONFIG"
         const val ACTION_ALARM = "zhiqiu.kongkim.action.ALARM"
         const val EXTRA_TRACK = "track"
