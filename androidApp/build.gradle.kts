@@ -1,0 +1,101 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
+
+plugins {
+    alias(libs.plugins.androidApplication)
+    alias(libs.plugins.composeCompiler)
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_11
+    }
+}
+
+val appVersion: String by rootProject.extra
+val appVersionCode = appVersion.split(".").fold(0) { acc, part -> acc * 100 + part.toInt() }
+
+val signingPropsFile = rootProject.file("androidApp/signing.properties")
+val signingProps = Properties()
+if (signingPropsFile.exists()) {
+    signingPropsFile.inputStream().use { signingProps.load(it) }
+}
+fun signingProp(name: String, envName: String): String? =
+    System.getenv(envName) ?: signingProps.getProperty(name)
+val hasSigningConfig = signingProp("storeFile", "KEYSTORE_FILE") != null
+    && signingProp("storePassword", "KEYSTORE_PASSWORD") != null
+    && signingProp("keyAlias", "KEY_ALIAS") != null
+    && signingProp("keyPassword", "KEY_PASSWORD") != null
+dependencies {
+    implementation(project(":shared"))
+
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.compose.runtime)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.material3)
+    implementation(libs.compose.ui)
+    implementation(libs.androidx.lifecycle.runtimeCompose)
+    implementation(libs.androidx.lifecycle.viewmodelCompose)
+
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
+    implementation(libs.androidx.media3.session)
+    implementation(libs.androidx.compose.material.icons.extended)
+
+    implementation(libs.compose.uiToolingPreview)
+    debugImplementation(libs.compose.uiTooling)
+}
+
+android {
+    namespace = "zhiqiu.kongkim"
+    compileSdk = libs.versions.android.compileSdk.get().toInt()
+
+    defaultConfig {
+        applicationId = "zhiqiu.kongkim"
+        minSdk = libs.versions.android.minSdk.get().toInt()
+        targetSdk = libs.versions.android.targetSdk.get().toInt()
+        versionCode = appVersionCode
+        versionName = appVersion
+    }
+    signingConfigs {
+        create("release") {
+            if (hasSigningConfig) {
+                storeFile = rootProject.file(signingProp("storeFile", "KEYSTORE_FILE")!!)
+                storePassword = signingProp("storePassword", "KEYSTORE_PASSWORD")
+                keyAlias = signingProp("keyAlias", "KEY_ALIAS")
+                keyPassword = signingProp("keyPassword", "KEY_PASSWORD")
+            } else {
+                initWith(getByName("debug"))
+            }
+        }
+    }
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+        debug {
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+    buildFeatures {
+        compose = true
+    }
+    sourceSets {
+        getByName("main").assets.directories.add(rootProject.file("media").absolutePath)
+    }
+}

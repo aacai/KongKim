@@ -1,0 +1,178 @@
+package zhiqiu.kongkim.media
+
+import android.app.PendingIntent
+import android.content.Intent
+import android.os.Bundle
+import androidx.annotation.OptIn
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaSession
+import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import zhiqiu.kongkim.MainActivity
+
+@OptIn(UnstableApi::class)
+class PlaybackService : MediaSessionService() {
+    private var mediaSession: MediaSession? = null
+    private lateinit var player: ExoPlayer
+    private lateinit var prefs: AppPreferences
+
+    override fun onCreate() {
+        super.onCreate()
+        prefs = AppPreferences(this)
+        setMediaNotificationProvider(
+            androidx.media3.session.DefaultMediaNotificationProvider.Builder(this)
+                .setChannelName(zhiqiu.kongkim.R.string.app_name)
+                .build()
+        )
+        player = ExoPlayer.Builder(this)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                /* handleAudioFocus = */ true
+            )
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            .build()
+
+        val sessionActivity = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        mediaSession = MediaSession.Builder(this, player)
+            .setSessionActivity(sessionActivity)
+            .setCallback(SessionCallback())
+            .build()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_CONFIG, ACTION_ALARM -> {
+                val track = MediaTrack.fromId(
+                    intent.getStringExtra(EXTRA_TRACK) ?: prefs.track.id
+                )
+                val audioOnly = intent.getBooleanExtra(
+                    EXTRA_AUDIO_ONLY,
+                    if (intent.action == ACTION_ALARM) true else prefs.audioOnly
+                )
+                val speed = intent.getFloatExtra(EXTRA_SPEED, prefs.speed)
+                val play = intent.getBooleanExtra(EXTRA_PLAY, true)
+                applyConfig(track, audioOnly, speed, play)
+                if (intent.action != ACTION_ALARM) {
+                    prefs.track = track
+                    prefs.audioOnly = audioOnly
+                    prefs.speed = speed
+                }
+            }
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
+
+    private fun applyConfig(
+        track: MediaTrack,
+        audioOnly: Boolean,
+        speed: Float,
+        play: Boolean
+    ) {
+        val asset = track.assetFile(audioOnly)
+        val uri = "asset:///$asset"
+        val current = player.currentMediaItem
+        if (current?.localConfiguration?.uri?.toString() != uri) {
+            // 同一版本在画面/音频之间切换时保留进度，换版本才回到开头
+            val resumeAt = if (current?.mediaId == track.id) player.currentPosition else C.TIME_UNSET
+            player.setMediaItem(
+                MediaItem.fromUri(uri).buildUpon().setMediaId(track.id).build()
+            )
+            player.prepare()
+            if (resumeAt != C.TIME_UNSET && resumeAt > 0) {
+                player.seekTo(resumeAt)
+            }
+        }
+        player.setPlaybackSpeed(speed)
+        if (play) {
+            player.playWhenReady = true
+            player.play()
+        }
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
+        mediaSession
+
+    override fun onDestroy() {
+        mediaSession?.run {
+            player.release()
+            release()
+            mediaSession = null
+        }
+        super.onDestroy()
+    }
+
+    private inner class SessionCallback : MediaSession.Callback {
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): MediaSession.ConnectionResult {
+            val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
+                .add(SessionCommand(COMMAND_SET_CONFIG, Bundle.EMPTY))
+                .build()
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                .setAvailableSessionCommands(sessionCommands)
+                .build()
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand,
+            args: Bundle
+        ): ListenableFuture<SessionResult> {
+            if (customCommand.customAction == COMMAND_SET_CONFIG) {
+                val track = MediaTrack.fromId(args.getString(EXTRA_TRACK))
+                val audioOnly = args.getBoolean(EXTRA_AUDIO_ONLY, prefs.audioOnly)
+                val speed = args.getFloat(EXTRA_SPEED, prefs.speed)
+                val play = args.getBoolean(EXTRA_PLAY, player.isPlaying)
+                applyConfig(track, audioOnly, speed, play)
+                prefs.track = track
+                prefs.audioOnly = audioOnly
+                prefs.speed = speed
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED))
+        }
+    }
+
+    companion object {
+        const val ACTION_CONFIG = "zhiqiu.kongkim.action.CONFIG"
+        const val ACTION_ALARM = "zhiqiu.kongkim.action.ALARM"
+        const val EXTRA_TRACK = "track"
+        const val EXTRA_AUDIO_ONLY = "audio_only"
+        const val EXTRA_SPEED = "speed"
+        const val EXTRA_PLAY = "play"
+        const val COMMAND_SET_CONFIG = "set_config"
+
+        fun configIntent(
+            context: android.content.Context,
+            track: MediaTrack,
+            audioOnly: Boolean,
+            speed: Float,
+            play: Boolean = true,
+            alarm: Boolean = false
+        ): Intent = Intent(context, PlaybackService::class.java).apply {
+            action = if (alarm) ACTION_ALARM else ACTION_CONFIG
+            putExtra(EXTRA_TRACK, track.id)
+            putExtra(EXTRA_AUDIO_ONLY, audioOnly)
+            putExtra(EXTRA_SPEED, speed)
+            putExtra(EXTRA_PLAY, play)
+        }
+    }
+}

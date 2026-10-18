@@ -1,0 +1,255 @@
+name: Build Packages
+
+on:
+  # 手动触发，可勾选要打哪些平台的包
+  workflow_dispatch:
+    inputs:
+      build_android:
+        description: "Build Android (签名 APK)"
+        type: boolean
+        default: true
+      build_desktop:
+        description: "Build Desktop (deb / msi / dmg)"
+        type: boolean
+        default: true
+  # main 日常推送只构建 Android APK；推送 tag（如 v1.0.0）时全量构建并发 Release
+  push:
+    branches: [main]
+    tags: ["v*", "V*"]
+
+permissions:
+  contents: write
+
+# 同一 ref 并发只保留最新一次，取消旧 run
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ----------------------------------------------------------------
+  # Android：签名 release APK
+  # Secrets: KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD
+  # main 推送与手动触发只出 artifact，推 tag 时供 Release 汇总
+  # ----------------------------------------------------------------
+  android:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'push' || inputs.build_android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # media/ 下的大体积视频走 Git LFS，打 APK 必须取回真实文件
+          lfs: true
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Decode Android signing keystore (from Secrets)
+        # 仅当配置了 KEYSTORE_BASE64 时才还原 keystore；否则 release 自动降级为 debug 签名
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/androidApp/release-key.jks"
+            echo "Keystore restored."
+          else
+            echo "No KEYSTORE_BASE64 secret; building with debug signing."
+          fi
+
+      - name: Verify media assets are real files
+        run: |
+          for f in media/5x.mp4 media/9x.mp4; do
+            size=$(stat -c %s "$f")
+            echo "$f = $size bytes"
+            if [ "$size" -lt 1000000 ]; then echo "::error::$f is a Git LFS pointer, not media"; exit 1; fi
+          done
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Android release APK
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/androidApp/release-key.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew :androidApp:assembleRelease --stacktrace
+
+      - name: Rename Android artifact
+        run: |
+          VER=$(sed -nE 's/^extra\["appVersion"\] = "([^"]+)".*/\1/p' build.gradle.kts | head -1)
+          cd androidApp/build/outputs/apk/release
+          for f in *.apk; do mv "$f" "KongKim-$VER-release.apk"; done
+          ls -1
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: androidApp/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # Desktop：按运行系统分别产出 deb / msi / dmg
+  # macOS x86 runner 已退役，仅打 arm64（Apple Silicon），Intel 经 Rosetta 运行。
+  # 注：本项目 desktopApp 未启用 Exe 目标，Windows 仅产出 msi。
+  # ----------------------------------------------------------------
+  desktop:
+    if: startsWith(github.ref, 'refs/tags/') || inputs.build_desktop
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+            task: packageDeb
+          - os: windows-latest
+            arch: x64
+            task: packageMsi
+          - os: macos-latest
+            arch: arm64
+            task: packageDmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Linux packaging deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fakeroot dpkg
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build desktop package
+        run: ./gradlew :desktopApp:${{ matrix.task }} --stacktrace
+
+      - name: Rename packages to KongKim-<version>-<arch>
+        run: |
+          VER=$(sed -nE 's/^extra\["appVersion"\] = "([^"]+)".*/\1/p' build.gradle.kts | head -1)
+          cd desktopApp/build/compose/binaries/main
+          for ext in deb msi dmg; do
+            find . -type f -name "*.$ext" | while read -r f; do
+              mv "$f" "$(dirname "$f")/KongKim-$VER-${{ matrix.arch }}.$ext"
+            done
+          done
+          find . -type f \( -name "*.deb" -o -name "*.msi" -o -name "*.dmg" \)
+
+      - name: Upload Desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            desktopApp/build/compose/binaries/main/**/*.deb
+            desktopApp/build/compose/binaries/main/**/*.msi
+            desktopApp/build/compose/binaries/main/**/*.dmg
+          if-no-files-found: error
+
+  # arm64 桌面包：仅 Linux 走预览版 arm runner，不可用时不影响主发布
+  desktop-arm:
+    if: startsWith(github.ref, 'refs/tags/') || inputs.build_desktop
+    continue-on-error: true
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Linux packaging deps
+        run: sudo apt-get update && sudo apt-get install -y fakeroot dpkg
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build desktop package
+        run: ./gradlew :desktopApp:packageDeb --stacktrace
+
+      - name: Rename packages to KongKim-<version>-arm64
+        run: |
+          VER=$(sed -nE 's/^extra\["appVersion"\] = "([^"]+)".*/\1/p' build.gradle.kts | head -1)
+          cd desktopApp/build/compose/binaries/main
+          find . -type f -name "*.deb" | while read -r f; do
+            mv "$f" "$(dirname "$f")/KongKim-$VER-arm64.deb"
+          done
+          find . -type f -name "*.deb"
+
+      - name: Upload Desktop ARM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-ubuntu-24.04-arm-arm64
+          path: desktopApp/build/compose/binaries/main/**/*.deb
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # Release：推送 v* tag 时把所有产物汇总发布到 GitHub Release
+  # ----------------------------------------------------------------
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [android, desktop, desktop-arm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Delete existing release (clean stale assets)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --yes || true
+
+      - name: Generate release notes manifest
+        run: |
+          {
+            echo "# KongKim ${GITHUB_REF_NAME} 发布包"
+            echo
+            find artifacts -type f | sort | while read -r f; do
+              NAME=$(basename "$f")
+              case "$NAME" in
+                *.apk) desc="Android 安装包（正式签名，可直接安装）" ;;
+                *.dmg) desc="macOS 安装包（arm64，拖入「应用程序」；首次打开被 Gatekeeper 拦时执行 xattr -dr com.apple.quarantine \"/Applications/KongKim.app\"）" ;;
+                *.msi) desc="Windows 安装包（MSI）" ;;
+                *-x64.deb) desc="Linux 安装包（x64，dpkg -i 安装）" ;;
+                *-arm64.deb) desc="Linux 安装包（arm64，dpkg -i 安装）" ;;
+                *) desc="其他产物" ;;
+              esac
+              printf -- '- `%s` — %s\n' "$NAME" "$desc"
+            done
+          } > release_notes.md
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/android/*.apk
+            artifacts/desktop-*/**/*.deb
+            artifacts/desktop-*/**/*.msi
+            artifacts/desktop-*/**/*.dmg
+          body_path: release_notes.md
