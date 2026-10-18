@@ -26,10 +26,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutionException
 import zhiqiu.kongkim.alarm.AlarmScheduler
+import zhiqiu.kongkim.media.AlarmItem
+import zhiqiu.kongkim.media.AlarmRules
 import zhiqiu.kongkim.media.AppPreferences
 import zhiqiu.kongkim.media.MediaTrack
 import zhiqiu.kongkim.media.PlaybackService
+import zhiqiu.kongkim.media.WeekParity
 import kotlin.math.abs
+import java.util.UUID
 
 /** 可快退/快进的步长，单位秒 */
 const val SKIP_SECONDS = 10
@@ -45,10 +49,9 @@ data class PlayerUiState(
 )
 
 data class AlarmUiState(
-    val enabled: Boolean = false,
-    val hour: Int = 6,
-    val minute: Int = 30,
-    val track: MediaTrack = MediaTrack.NINE,
+    val alarms: List<AlarmItem> = emptyList(),
+    val holidays: Set<String> = emptySet(),
+    val thisWeekIsBigWeek: Boolean = true,
 )
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
@@ -71,12 +74,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val position: StateFlow<Long> = _position.asStateFlow()
 
     private val _alarm = MutableStateFlow(
-        AlarmUiState(prefs.alarmEnabled, prefs.alarmHour, prefs.alarmMinute, prefs.alarmTrack)
+        AlarmUiState(
+            alarms = prefs.alarms,
+            holidays = prefs.holidays,
+            thisWeekIsBigWeek = prefs.bigWeekParityValue == AlarmRules.currentWeekParity(),
+        )
     )
     val alarm: StateFlow<AlarmUiState> = _alarm.asStateFlow()
 
-    /** 界面不可见时由服务撤掉视频轨道，息屏也能把整趟口令放完 */
-    private var screenOn = true
+    /** 小窗开关，设置项绑定；退出应用时是否自动进 PiP 由 [shouldEnterPictureInPicture] 判断 */
+    private val _pipEnabled = MutableStateFlow(prefs.pipEnabled)
+    val pipEnabled: StateFlow<Boolean> = _pipEnabled.asStateFlow()
+
+    /** 小窗模式：由 MainActivity 在进入/退出 PiP 时写入，界面据此只渲染画面 */
+    private val _pipMode = MutableStateFlow(false)
+    val pipMode: StateFlow<Boolean> = _pipMode.asStateFlow()
 
     /** 供视频画面绑定；连接完成后 [PlayerUiState.isReady] 会变为 true */
     val sessionPlayer: Player? get() = controller
@@ -259,20 +271,33 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         pushConfig(play = _player.value.isPlaying)
     }
 
-    /** 息屏或切后台时只撤视频轨道，播放本身不停 */
-    fun setScreenOn(screenOn: Boolean) {
-        if (screenOn == this.screenOn) return
-        this.screenOn = screenOn
-        // 没有 controller 就没人在播放，此时去 startService 会撞上后台启动限制
-        if (_player.value.audioOnly || controller == null) return
-        pushConfig(play = _player.value.isPlaying)
-    }
-
+    /** 息屏或切后台时什么都不用做：ExoPlayer 会通过 SurfaceHolder 回调自动撤掉视频输出，声音继续 */
     fun setSpeed(speed: Float) {
         val value = nearestSpeed(speed)
         if (value == _player.value.speed) return
         _player.update { it.copy(speed = value) }
         pushConfig(play = _player.value.isPlaying)
+    }
+
+    /** 小窗开关（设置项） */
+    fun setPipEnabled(enabled: Boolean) {
+        if (enabled == _pipEnabled.value) return
+        prefs.pipEnabled = enabled
+        _pipEnabled.value = enabled
+    }
+
+    /** 进入/退出小窗，由 MainActivity 写入 */
+    fun setPipMode(active: Boolean) {
+        _pipMode.value = active
+    }
+
+    /** 只有视频模式、正在播放、且用户没关小窗时才进 PiP；只听声音时小窗没有意义 */
+    fun shouldEnterPictureInPicture(): Boolean =
+        _pipEnabled.value && _player.value.isPlaying && !_player.value.audioOnly
+
+    /** 小窗关闭按钮用：停下播放，界面回到应用页面 */
+    fun pause() {
+        controller?.pause()
     }
 
     private fun pushConfig(play: Boolean) {
@@ -286,7 +311,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             putBoolean(PlaybackService.EXTRA_AUDIO_ONLY, state.audioOnly)
             putFloat(PlaybackService.EXTRA_SPEED, state.speed)
             putBoolean(PlaybackService.EXTRA_PLAY, play)
-            putBoolean(PlaybackService.EXTRA_SCREEN_ON, screenOn)
         }
         val c = controller
         if (c != null) {
@@ -302,40 +326,78 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     audioOnly = state.audioOnly,
                     speed = state.speed,
                     play = play,
-                    screenOn = screenOn,
                 )
             )
         }
     }
 
-    fun setAlarmEnabled(enabled: Boolean) {
-        _alarm.update { it.copy(enabled = enabled) }
-        prefs.alarmEnabled = enabled
-        persistAlarm()
+    // ---------- 闹钟：多条 + 重复规则 ----------
+
+    private fun persistAlarms(list: List<AlarmItem>) {
+        prefs.alarms = list
+        _alarm.update { it.copy(alarms = list) }
+        AlarmScheduler.scheduleAll(getApplication())
     }
 
-    fun setAlarmTime(hour: Int, minute: Int) {
-        _alarm.update { it.copy(hour = hour, minute = minute) }
-        prefs.alarmHour = hour
-        prefs.alarmMinute = minute
-        persistAlarm()
+    fun addAlarm(alarm: AlarmItem) {
+        persistAlarms(_alarm.value.alarms + alarm)
     }
 
-    fun setAlarmTrack(track: MediaTrack) {
-        _alarm.update { it.copy(track = track) }
-        prefs.alarmTrack = track
-        persistAlarm()
+    fun updateAlarm(alarm: AlarmItem) {
+        val list = _alarm.value.alarms
+        val idx = list.indexOfFirst { it.id == alarm.id }
+        if (idx < 0) return
+        persistAlarms(list.toMutableList().also { it[idx] = alarm })
     }
 
-    private fun persistAlarm() {
-        val app = getApplication<Application>()
-        val state = _alarm.value
-        if (state.enabled) {
-            AlarmScheduler.schedule(app, state.hour, state.minute, state.track)
-        } else {
-            AlarmScheduler.cancel(app)
-        }
+    fun deleteAlarm(id: String) {
+        val list = _alarm.value.alarms.filter { it.id != id }
+        prefs.alarms = list
+        _alarm.update { it.copy(alarms = list) }
+        AlarmScheduler.scheduleAll(getApplication())
     }
+
+    fun toggleAlarm(id: String, enabled: Boolean) {
+        val list = _alarm.value.alarms
+        val idx = list.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        val updated = list[idx].copy(enabled = enabled)
+        persistAlarms(list.toMutableList().also { it[idx] = updated })
+    }
+
+    // ---------- 节假日 ----------
+
+    fun addHoliday(date: String) {
+        val set = _alarm.value.holidays + date
+        prefs.holidays = set
+        _alarm.update { it.copy(holidays = set) }
+        AlarmScheduler.scheduleAll(getApplication())
+    }
+
+    fun removeHoliday(date: String) {
+        val set = _alarm.value.holidays - date
+        prefs.holidays = set
+        _alarm.update { it.copy(holidays = set) }
+        AlarmScheduler.scheduleAll(getApplication())
+    }
+
+    // ---------- 大小周校准 ----------
+
+    fun setThisWeekIsBigWeek(isBigWeek: Boolean) {
+        val parity = AlarmRules.currentWeekParity()
+        val value = if (isBigWeek) parity else parity xor 1
+        prefs.bigWeekParityValue = value
+        _alarm.update { it.copy(thisWeekIsBigWeek = isBigWeek) }
+        AlarmScheduler.scheduleAll(getApplication())
+    }
+
+    /** 便捷：用当前默认参数新建一条“每天”闹钟 */
+    fun newAlarmTemplate(): AlarmItem = AlarmItem(
+        id = UUID.randomUUID().toString(),
+        hour = 7,
+        minute = 0,
+        track = prefs.track,
+    )
 
     fun canScheduleExactAlarms(): Boolean = AlarmScheduler.canScheduleExact(getApplication())
 

@@ -10,14 +10,16 @@ import zhiqiu.kongkim.media.PlaybackService
 
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action != ACTION_FIRE) return
+        if (intent?.action != AlarmScheduler.ACTION_FIRE) return
+        val id = intent.getStringExtra(AlarmScheduler.EXTRA_ALARM_ID) ?: return
         val prefs = AppPreferences(context)
-        val track = MediaTrack.fromId(
-            intent.getStringExtra(EXTRA_TRACK) ?: prefs.alarmTrack.id
-        )
+        val alarm = prefs.alarms.find { it.id == id } ?: return
+        // 先把这一条排到下一次合法时间（若刚被关闭，scheduleOne 会撤销它）
+        AlarmScheduler.scheduleOne(context, alarm)
+        if (!alarm.enabled) return
         val serviceIntent = PlaybackService.configIntent(
             context = context,
-            track = track,
+            track = alarm.track,
             audioOnly = true,
             speed = prefs.speed,
             play = true,
@@ -28,19 +30,5 @@ class AlarmReceiver : BroadcastReceiver() {
         } else {
             context.startService(serviceIntent)
         }
-        // 每天同一时间再响一次
-        if (prefs.alarmEnabled) {
-            AlarmScheduler.schedule(
-                context,
-                prefs.alarmHour,
-                prefs.alarmMinute,
-                prefs.alarmTrack
-            )
-        }
-    }
-
-    companion object {
-        const val ACTION_FIRE = "zhiqiu.kongkim.action.ALARM_FIRE"
-        const val EXTRA_TRACK = "track"
     }
 }

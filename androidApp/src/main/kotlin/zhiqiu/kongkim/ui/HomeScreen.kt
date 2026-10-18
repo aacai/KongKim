@@ -29,9 +29,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Forward10
@@ -43,9 +47,14 @@ import androidx.compose.material.icons.filled.SelfImprovement
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.outlined.Alarm
+import androidx.compose.material.icons.outlined.CalendarMonth
+import androidx.compose.material.icons.outlined.CalendarViewWeek
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
@@ -54,6 +63,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -61,6 +71,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -90,7 +101,10 @@ import androidx.media3.common.Player
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.flow.StateFlow
+import zhiqiu.kongkim.media.AlarmItem
 import zhiqiu.kongkim.media.MediaTrack
+import zhiqiu.kongkim.media.WeekParity
+import java.util.Calendar
 
 @Composable
 fun HomeScreen() {
@@ -98,12 +112,16 @@ fun HomeScreen() {
     val viewModel: PlayerViewModel = viewModel()
     val player by viewModel.player.collectAsStateWithLifecycle()
     val alarm by viewModel.alarm.collectAsStateWithLifecycle()
+    val pipEnabled by viewModel.pipEnabled.collectAsStateWithLifecycle()
+    val pipMode by viewModel.pipMode.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
-    var showTimePicker by remember { mutableStateOf(false) }
     var fullscreen by rememberSaveable { mutableStateOf(false) }
     var notificationsEnabled by remember { mutableStateOf(true) }
     var exactAlarmsAllowed by remember { mutableStateOf(viewModel.canScheduleExactAlarms()) }
+    /** 正在编辑的闹钟：非 null 时弹编辑框；新建时是一个模板 */
+    var editingAlarm by remember { mutableStateOf<AlarmItem?>(null) }
+    var showHolidayManager by rememberSaveable { mutableStateOf(false) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -122,11 +140,9 @@ fun HomeScreen() {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
-                    viewModel.setScreenOn(true)
                     exactAlarmsAllowed = viewModel.canScheduleExactAlarms()
                     notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
                 }
-                Lifecycle.Event.ON_PAUSE -> viewModel.setScreenOn(false)
                 else -> Unit
             }
         }
@@ -135,6 +151,18 @@ fun HomeScreen() {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        // 小窗模式：整页只留一块黑底画面，控制交给系统小窗按钮和通知
+        if (pipMode) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+            ) {
+                StageSurface(sessionPlayer = viewModel.sessionPlayer)
+            }
+            return@Box
+        }
+
         Scaffold(containerColor = MaterialTheme.colorScheme.background) { innerPadding ->
             Column(
                 modifier = Modifier
@@ -189,67 +217,102 @@ fun HomeScreen() {
                             checked = player.audioOnly,
                             onCheckedChange = viewModel::setAudioOnly
                         )
+                        SwitchRow(
+                            icon = Icons.Filled.PictureInPictureAlt,
+                            title = "退出应用时小窗播放",
+                            subtitle = "视频模式下按 Home 键，自动换成小窗继续跟练",
+                            checked = pipEnabled,
+                            onCheckedChange = viewModel::setPipEnabled
+                        )
                     }
                 }
 
-                SectionHeader("每日提醒")
+                SectionHeader("闹钟")
                 SectionCard {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        SwitchRow(
-                            icon = Icons.Outlined.Alarm,
-                            title = "每日提醒",
-                            subtitle = if (alarm.enabled) {
-                                "已开启 · ${alarm.track.label}"
-                            } else {
-                                "关闭"
-                            },
-                            checked = alarm.enabled,
-                            onCheckedChange = { enabled ->
-                                if (enabled && !viewModel.canScheduleExactAlarms()) {
-                                    viewModel.openExactAlarmSettings()
-                                }
-                                exactAlarmsAllowed = viewModel.canScheduleExactAlarms()
-                                viewModel.setAlarmEnabled(enabled)
-                            }
-                        )
-
-                        TimeRow(
-                            hour = alarm.hour,
-                            minute = alarm.minute,
-                            onClick = { showTimePicker = true }
-                        )
-
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (alarm.alarms.isEmpty()) {
                             Text(
-                                text = "提醒版本",
-                                style = MaterialTheme.typography.labelLarge,
+                                text = "还没有闹钟，点下面按钮新建",
+                                style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                MediaTrack.entries.forEach { option ->
-                                    FilterChip(
-                                        selected = option == alarm.track,
-                                        onClick = { viewModel.setAlarmTrack(option) },
-                                        label = { Text(option.label) }
-                                    )
-                                }
-                            }
+                        }
+                        alarm.alarms.forEach { item ->
+                            AlarmListRow(
+                                alarm = item,
+                                onToggle = { enabled ->
+                                    if (enabled && !viewModel.canScheduleExactAlarms()) {
+                                        viewModel.openExactAlarmSettings()
+                                    }
+                                    exactAlarmsAllowed = viewModel.canScheduleExactAlarms()
+                                    viewModel.toggleAlarm(item.id, enabled)
+                                },
+                                onClick = { editingAlarm = item }
+                            )
                         }
 
+                        Button(
+                            onClick = { editingAlarm = viewModel.newAlarmTemplate() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("新建闹钟")
+                        }
+
+                        // 节假日管理
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { showHolidayManager = true }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.CalendarMonth,
+                                contentDescription = null,
+                                modifier = Modifier.size(22.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("节假日管理", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    text = "已设 ${alarm.holidays.size} 天 · 勾选“节假日跳过”的闹钟当天不响",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Filled.ChevronRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        SwitchRow(
+                            icon = Icons.Outlined.CalendarViewWeek,
+                            title = "本周是大周",
+                            subtitle = "校准一次，大周/小周闹钟即与你排班一致",
+                            checked = alarm.thisWeekIsBigWeek,
+                            onCheckedChange = viewModel::setThisWeekIsBigWeek
+                        )
+
                         Text(
-                            text = "到点由本应用直接播放，不依赖系统铃声",
+                            text = "到点由本应用直接播放对应版本，不依赖系统铃声",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
 
-                if (alarm.enabled && !exactAlarmsAllowed) {
+                if (alarm.alarms.isNotEmpty() && !exactAlarmsAllowed) {
                     HintCard(
                         icon = Icons.Outlined.Warning,
                         text = "系统还未允许精确闹钟，提醒可能延迟",
@@ -292,18 +355,334 @@ fun HomeScreen() {
         }
     }
 
-    if (showTimePicker) {
-        AlarmTimeDialog(
-            hour = alarm.hour,
-            minute = alarm.minute,
-            onDismiss = { showTimePicker = false },
-            onConfirm = { hour, minute ->
-                viewModel.setAlarmTime(hour, minute)
-                showTimePicker = false
+    editingAlarm?.let { draft ->
+        AlarmEditorDialog(
+            alarm = draft,
+            isNew = !alarm.alarms.any { it.id == draft.id },
+            onDismiss = { editingAlarm = null },
+            onSave = { updated ->
+                if (alarm.alarms.any { it.id == updated.id }) {
+                    viewModel.updateAlarm(updated)
+                } else {
+                    viewModel.addAlarm(updated)
+                }
+                editingAlarm = null
+            },
+            onDelete = {
+                viewModel.deleteAlarm(draft.id)
+                editingAlarm = null
             }
         )
     }
+
+    if (showHolidayManager) {
+        HolidayManagerDialog(
+            holidays = alarm.holidays,
+            onAdd = viewModel::addHoliday,
+            onRemove = viewModel::removeHoliday,
+            onDismiss = { showHolidayManager = false }
+        )
+    }
 }
+
+// ===================== 闹钟相关 UI =====================
+
+/** 一周七天标签，索引 0..6 对应周一到周日 */
+private val DAY_LABELS = listOf("一", "二", "三", "四", "五", "六", "日")
+/** Calendar 星期常量(SUNDAY=1..SATURDAY=7) → DAY_LABELS 索引(0..6) */
+private fun dayIndex(calendarDay: Int): Int = (calendarDay - Calendar.MONDAY + 7) % 7
+
+/** 把一条闹钟的重复规则翻译成人话 */
+private fun repeatSummary(alarm: AlarmItem): String {
+    val days = alarm.repeatDays
+    val base = when {
+        days == AlarmItem.DEFAULT_DAYS -> "每天"
+        days == setOf(Calendar.MONDAY, Calendar.TUESDAY, Calendar.WEDNESDAY, Calendar.THURSDAY, Calendar.FRIDAY) -> "工作日"
+        days == setOf(Calendar.SATURDAY, Calendar.SUNDAY) -> "周末"
+        days.isEmpty() -> "不重复"
+        else -> days.sortedBy { dayIndex(it) }.joinToString("") { DAY_LABELS[dayIndex(it)] }
+    }
+    val prefix = when (alarm.weekParity) {
+        WeekParity.BIG_WEEK -> "大周·"
+        WeekParity.SMALL_WEEK -> "小周·"
+        WeekParity.EVERY -> ""
+    }
+    return prefix + base + if (alarm.skipOnHoliday) " · 节假日跳过" else ""
+}
+
+@Composable
+private fun AlarmListRow(
+    alarm: AlarmItem,
+    onToggle: (Boolean) -> Unit,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "%02d:%02d".format(alarm.hour, alarm.minute),
+                style = MaterialTheme.typography.headlineSmall
+            )
+            val sub = buildList {
+                if (alarm.label.isNotBlank()) add(alarm.label)
+                add(repeatSummary(alarm))
+                add(alarm.track.label)
+            }.joinToString(" · ")
+            Text(
+                text = sub,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Switch(checked = alarm.enabled, onCheckedChange = onToggle)
+    }
+}
+
+@Composable
+private fun AlarmEditorDialog(
+    alarm: AlarmItem,
+    isNew: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (AlarmItem) -> Unit,
+    onDelete: () -> Unit,
+) {
+    var draft by remember { mutableStateOf(alarm) }
+    var showTimePicker by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (isNew) "新建闹钟" else "编辑闹钟") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // 时间
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                        .clickable { showTimePicker = true }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("时间", style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("%02d:%02d".format(draft.hour, draft.minute),
+                            style = MaterialTheme.typography.headlineMedium)
+                    }
+                    Icon(Icons.Filled.Schedule, contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                // 标签（可选）
+                OutlinedTextField(
+                    value = draft.label,
+                    onValueChange = { draft = draft.copy(label = it) },
+                    label = { Text("备注（可选，如 晨练 / 晚练）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // 练习版本
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("练习版本", style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MediaTrack.entries.forEach { option ->
+                            FilterChip(
+                                selected = option == draft.track,
+                                onClick = { draft = draft.copy(track = option) },
+                                label = { Text(option.label) }
+                            )
+                        }
+                    }
+                }
+
+                // 重复星期
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("重复", style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        DAY_LABELS.forEachIndexed { index, label ->
+                            val dayConst = DAY_INDEX_TO_CAL[index]
+                            val selected = dayConst in draft.repeatDays
+                            FilterChip(
+                                selected = selected,
+                                onClick = {
+                                    draft = draft.copy(
+                                        repeatDays = if (selected) {
+                                            draft.repeatDays - dayConst
+                                        } else {
+                                            draft.repeatDays + dayConst
+                                        }
+                                    )
+                                },
+                                label = { Text(label) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
+                // 周奇偶
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("大小周", style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        WeekParity.entries.forEach { parity ->
+                            FilterChip(
+                                selected = draft.weekParity == parity,
+                                onClick = { draft = draft.copy(weekParity = parity) },
+                                label = {
+                                    Text(
+                                        when (parity) {
+                                            WeekParity.EVERY -> "每周"
+                                            WeekParity.BIG_WEEK -> "仅大周"
+                                            WeekParity.SMALL_WEEK -> "仅小周"
+                                        }
+                                    )
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
+                // 节假日跳过
+                SwitchRow(
+                    icon = Icons.Outlined.CalendarMonth,
+                    title = "节假日跳过",
+                    subtitle = "当天是节假日时不响",
+                    checked = draft.skipOnHoliday,
+                    onCheckedChange = { draft = draft.copy(skipOnHoliday = it) }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(draft) }) { Text("保存") }
+        },
+        dismissButton = {
+            Row {
+                if (!isNew) {
+                    TextButton(onClick = onDelete) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        }
+    )
+
+    if (showTimePicker) {
+        AlarmTimeDialog(
+            hour = draft.hour,
+            minute = draft.minute,
+            onDismiss = { showTimePicker = false },
+            onConfirm = { h, m -> draft = draft.copy(hour = h, minute = m); showTimePicker = false }
+        )
+    }
+}
+
+/** 周一到周日(Calendar 常量) 的索引映射：DAY_INDEX_TO_CAL[0]=MONDAY ... [6]=SUNDAY */
+private val DAY_INDEX_TO_CAL = listOf(
+    Calendar.MONDAY, Calendar.TUESDAY, Calendar.WEDNESDAY, Calendar.THURSDAY,
+    Calendar.FRIDAY, Calendar.SATURDAY, Calendar.SUNDAY
+)
+
+@Composable
+private fun HolidayManagerDialog(
+    holidays: Set<String>,
+    onAdd: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var showDatePicker by remember { mutableStateOf(false) }
+    val sorted = holidays.sortedDescending()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("节假日管理") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "勾选了“节假日跳过”的闹钟，在这些日期不会响。可手动增删。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                            .format(java.util.Date())
+                        onAdd(today)
+                    }) { Text("加今天") }
+                    Button(onClick = {
+                        val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, 1) }
+                        onAdd(Sdf.format(cal.time))
+                    }) { Text("加明天") }
+                    Button(onClick = { showDatePicker = true }) { Text("选日期") }
+                }
+                if (sorted.isEmpty()) {
+                    Text("暂无节假日", style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                sorted.forEach { date ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(date, style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f))
+                        IconButton(onClick = { onRemove(date) }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "删除")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("完成") }
+        }
+    )
+
+    if (showDatePicker) {
+        val state = rememberDatePickerState()
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    state.selectedDateMillis?.let { millis ->
+                        val cal = Calendar.getInstance().apply { timeInMillis = millis }
+                        onAdd(Sdf.format(cal.time))
+                    }
+                    showDatePicker = false
+                }) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePicker = false }) { Text("取消") }
+            }
+        ) {
+            DatePicker(state = state)
+        }
+    }
+}
+
+/** 与 AlarmRules 同格式的日期串，供节假日对话框复用 */
+private val Sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
 
 @Composable
 private fun AppHeader(isPlaying: Boolean) {
@@ -590,7 +969,7 @@ private fun MediaStage(
 @Composable
 private fun StageSurface(
     sessionPlayer: Player?,
-    onTogglePlay: () -> Unit,
+    onTogglePlay: () -> Unit = {},
 ) {
     AndroidView(
         factory = { ctx ->
